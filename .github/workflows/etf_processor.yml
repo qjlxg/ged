@@ -1,0 +1,46 @@
+name: etf_processor
+
+on:
+  push:
+    # 当脚本、工作流或数据源变动时触发
+    paths:
+      - 'etf_processor.py'
+      - '.github/workflows/etf_processor.yml'
+      - 'ETF列表沪.xls'
+      - 'ETF列表深.xlsx'
+  workflow_dispatch: # 支持手动运行
+
+jobs:
+  run-logic:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 赋予推送权限
+
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: 安装处理库
+        run: |
+          pip install pandas openpyxl xlrd pytz
+
+      - name: 执行清理脚本
+        run: python etf_processor.py
+
+      - name: 提交并推送到仓库
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "Update ETF list $(date +'%Y-%m-%d %H:%M:%S')"
+            git push
+          else
+            echo "No changes to commit"
+          fi
