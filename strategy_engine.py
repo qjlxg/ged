@@ -4,56 +4,46 @@ import pandas as pd
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
 
-# --- 核心参数 ---
-RSI_LOW = 30
-BIAS_LOW = -4.0
-RETR_WATCH = -10.0
-VOL_BURST = 1.5
+# --- 核心参数设置 ---
+GRID_GAP = -5.0        # 补仓网格：较上次买入跌5%再补
+RETR_WATCH = -10.0     # 进入雷达的回撤门槛
+RSI_LOW = 30           # 超卖阈值
+BIAS_LOW = -5.0        # 乖离率阈值
 
-def calculate_rsi(series, period=6):
+def calculate_rsi(series, period=12):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     return 100 - (100 / (1 + (gain / loss)))
 
 def process_file(file_path):
+    """分析单个基金数据"""
     try:
-        try:
-            df = pd.read_csv(file_path, encoding='utf-8')
-        except:
-            df = pd.read_csv(file_path, encoding='gbk')
-        if df.empty: return None
-
-        # 格式自适应
-        is_otc = 'net_value' in df.columns
-        if is_otc:
+        try: df = pd.read_csv(file_path, encoding='utf-8')
+        except: df = pd.read_csv(file_path, encoding='gbk')
+        
+        if 'net_value' in df.columns:
             df = df.rename(columns={'date': '日期', 'net_value': '收盘'})
-            df['日期'] = pd.to_datetime(df['日期'])
-            df = df.sort_values(by='日期', ascending=True).reset_index(drop=True)
-            df['成交量'] = 0
-        else:
-            df = df.rename(columns={'成交量': 'vol'})
-            df['成交量'] = df.get('vol', 0)
+        df['日期'] = pd.to_datetime(df['日期'])
+        df = df.sort_values(by='日期').reset_index(drop=True)
 
-        if '收盘' not in df.columns or len(df) < 30: return None
-
+        if len(df) < 60: return None
+        
         # 计算指标
-        df['rsi'] = calculate_rsi(df['收盘'], 6)
-        df['ma6'] = df['收盘'].rolling(window=6).mean()
-        df['bias'] = ((df['收盘'] - df['ma6']) / df['ma6']) * 100
-        df['max_30'] = df['收盘'].rolling(window=30).max()
-        df['retr'] = ((df['收盘'] - df['max_30']) / df['max_30']) * 100
-        df['v_ma5'] = df['成交量'].rolling(window=5).mean()
-        df['v_ratio'] = df['成交量'] / df['v_ma5']
+        df['rsi'] = calculate_rsi(df['收盘'], 12)
+        df['ma20'] = df['收盘'].rolling(window=20).mean()
+        df['bias'] = ((df['收盘'] - df['ma20']) / df['ma20']) * 100
+        df['max_60'] = df['收盘'].rolling(window=60).max()
+        df['retr'] = ((df['收盘'] - df['max_60']) / df['max_60']) * 100
 
         curr = df.iloc[-1]
         code = os.path.splitext(os.path.basename(file_path))[0]
         
         if curr['retr'] <= RETR_WATCH:
-            tags = []
-            if curr['rsi'] < RSI_LOW: tags.append("RSI")
-            if curr['bias'] < BIAS_LOW: tags.append("BIAS")
-            if not is_otc and curr['v_ratio'] > VOL_BURST: tags.append("🔥")
+            score = 1
+            if curr['retr'] <= -15.0: score += 2
+            if curr['rsi'] < RSI_LOW: score += 2
+            if curr['bias'] < BIAS_LOW: score += 1
             
             return {
                 'date': str(curr['日期']).split(' ')[0],
@@ -61,94 +51,79 @@ def process_file(file_path):
                 'price': round(curr['收盘'], 4),
                 '回撤%': round(curr['retr'], 2),
                 'RSI': round(curr['rsi'], 2),
-                'BIAS': round(curr['bias'], 2),
-                '量比': round(curr['v_ratio'], 2) if curr['v_ratio'] > 0 else "--",
-                '信号': " ".join(tags) if tags else "观察"
+                '评分': score
             }
     except: return None
+
+def get_last_entry_from_history(fund_code):
+    """从所有历史存档中找该基金的最后一笔价格"""
+    history_files = sorted(glob.glob('202*/**/*.csv', recursive=True))
+    if not history_files: return None
+    
+    # 从最新的文件往回找
+    for f in reversed(history_files):
+        try:
+            h_df = pd.read_csv(f)
+            # 统一转成字符串匹配
+            match = h_df[h_df['fund_code'].astype(str).str.zfill(6) == str(fund_code).zfill(6)]
+            if not match.empty:
+                return match.iloc[-1]['price']
+        except: continue
     return None
 
-def get_performance_3day():
-    """复盘：计算信号发出后3日内的最高涨幅"""
-    history_files = glob.glob('202*/**/*.csv', recursive=True)
-    perf_list = []
-    for h_file in history_files:
-        if any(x in h_file for x in ['performance', 'track', 'history']): continue
-        try:
-            h_df = pd.read_csv(h_file)
-            for _, sig in h_df.iterrows():
-                code = str(sig['fund_code']).zfill(6)
-                raw_path = f'fund_data/{code}.csv'
-                if os.path.exists(raw_path):
-                    raw_df = pd.read_csv(raw_path)
-                    if 'net_value' in raw_df.columns:
-                        raw_df = raw_df.rename(columns={'date': '日期', 'net_value': '收盘'})
-                    raw_df['日期'] = pd.to_datetime(raw_df['日期']).dt.strftime('%Y-%m-%d')
-                    
-                    idx_list = raw_df[raw_df['日期'] == str(sig['date'])].index
-                    if not idx_list.empty:
-                        curr_idx = idx_list[0]
-                        # 获取未来3天的数据
-                        future_df = raw_df.iloc[curr_idx+1 : curr_idx+4]
-                        if not future_df.empty:
-                            max_price = future_df['收盘'].max()
-                            max_change = (max_price - sig['price']) / sig['price'] * 100
-                            last_price = future_df.iloc[-1]['收盘']
-                            end_change = (last_price - sig['price']) / sig['price'] * 100
-                            
-                            perf_list.append({
-                                '日期': sig['date'], '代码': code, '入场': sig['price'],
-                                '3日最高%': round(max_change, 2),
-                                '目前累积%': round(end_change, 2),
-                                '状态': '✅获利' if max_change > 1.5 else '❌走弱'
-                            })
-        except: continue
-    return pd.DataFrame(perf_list)
-
-def update_readme(current_res, perf_df):
-    now_bj = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    content = f"# 🤖 ETF/基金 策略雷达 (实战加强版)\n\n> 最后更新: `{now_bj}`\n\n"
-    
-    # 1. 战绩看板
-    if not perf_df.empty:
-        win_rate = (perf_df['3日最高%'] > 1.0).sum() / len(perf_df) * 100
-        content += "## 📊 策略效率 (3日内最高反弹 > 1% 概率)\n"
-        content += f"> **当前综合胜率**: `{win_rate:.2f}%` | **回测样本**: `{len(perf_df)}` \n\n"
-
-    # 2. 实时雷达
-    content += "## 🎯 实时监控 (回撤 > 10%)\n"
-    if current_res:
-        df = pd.DataFrame(current_res)
-        strong = df[df['信号'].str.contains('RSI|BIAS|🔥')]
-        if not strong.empty:
-            content += "### 🔴 第一梯队：技术见底/放量异动\n"
-            content += strong.sort_values('回撤%').to_markdown(index=False) + "\n\n"
-        
-        others = df[df['信号'] == "观察"]
-        content += "### 🔵 第二梯队：深度回撤池\n"
-        content += others.sort_values('回撤%').head(10).to_markdown(index=False) + "\n"
-    
-    # 3. 历史明细
-    content += "\n## 📈 历史信号追踪 (3日表现)\n"
-    if not perf_df.empty:
-        content += perf_df.tail(15).iloc[::-1].to_markdown(index=False) + "\n"
-    
-    with open('README.md', 'w', encoding='utf-8') as f:
-        f.write(content)
-
 def main():
+    # 1. 获取今日信号
     files = glob.glob('fund_data/*.csv')
     with Pool(cpu_count()) as p:
-        results = [r for r in p.map(process_file, files) if r is not None]
+        today_signals = [r for r in p.map(process_file, files) if r is not None]
     
-    if results:
+    # 2. 结合历史数据给出网格建议
+    advice_list = []
+    for sig in today_signals:
+        last_price = get_last_entry_from_history(sig['fund_code'])
+        
+        if last_price:
+            change = (sig['price'] - last_price) / last_price * 100
+            if change <= GRID_GAP:
+                sig['操作'] = "🔥 网格补仓"
+            elif change >= 5.0: # 相比上次买入涨了5%
+                sig['操作'] = "💰 止盈减仓"
+            else:
+                sig['操作'] = "⏳ 锁仓等待"
+        else:
+            sig['操作'] = "🌱 首笔建仓" if sig['评分'] >= 4 else "🔭 持续观察"
+        advice_list.append(sig)
+
+    # 3. 存档今日数据 (保留历史)
+    if advice_list:
         now = datetime.now()
         folder = now.strftime('%Y/%m')
         os.makedirs(folder, exist_ok=True)
-        pd.DataFrame(results).to_csv(f"{folder}/sig_{now.strftime('%d_%H%M%S')}.csv", index=False)
+        filename = f"{folder}/fund_sig_{now.strftime('%d_%H%M%S')}.csv"
+        pd.DataFrame(advice_list).to_csv(filename, index=False)
+        
+        # 4. 更新 README 看板
+        update_readme(advice_list)
+
+def update_readme(advice_list):
+    now_bj = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    df = pd.DataFrame(advice_list).sort_values('评分', ascending=False)
     
-    perf_df = get_performance_3day()
-    update_readme(results, perf_df)
+    content = f"# 📊 基金网格实战雷达\n\n> 更新：`{now_bj}` | 策略：网格分批加仓\n\n"
+    
+    # 市场情绪警报
+    if len(df[df['评分'] >= 4]) >= 5:
+        content += "> 🚨 **底部共振**：当前多个品种进入深度超跌区，适合执行网格补仓。\n\n"
+
+    content += "## 🎯 今日网格执行建议\n"
+    content += df.to_markdown(index=False) + "\n\n"
+    
+    content += "## 📑 网格说明\n"
+    content += f"- **网格间距**：{GRID_GAP}%（相比上次买入价跌破此值才补仓）。\n"
+    content += "- **历史存档**：所有历史信号均保存在相应月份文件夹下，作为补仓参考依据。\n"
+
+    with open('README.md', 'w', encoding='utf-8') as f:
+        f.write(content)
 
 if __name__ == "__main__":
     main()
