@@ -1,0 +1,41 @@
+name: ETF Strategy Runner
+
+on:
+  schedule:
+    # 北京时间(UTC+8) 每3小时运行一次
+    - cron: '0 1,4,7,10,13,16,19,22 * * *'
+  push:
+    paths:
+      - 'strategy_engine.py'
+      - '.github/workflows/strategy_engine.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # 必须获取完整提交历史以读取旧信号文件
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: pip install pandas pandas-ta
+
+    - name: Run Engine
+      run: python strategy_engine.py
+
+    - name: Commit and Push
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        git add .
+        # 检查是否有文件更新，避免空提交
+        if ! git diff --cached --quiet; then
+          git commit -m "Auto Update: Signals & History Tracking $(date +'%Y-%m-%d %H:%M')"
+          git push
+        fi
