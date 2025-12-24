@@ -1,71 +1,103 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ETF列表数据处理脚本
+功能：读取沪、深ETF列表，清理流动性差、规模小的品种，专注于主流、易于交易的ETF
+"""
+
 import pandas as pd
-import os
+import numpy as np
 from datetime import datetime
-import pytz
+import os
+import sys
 
-def process_etf():
-    # 1. 设置上海时区
-    tz = pytz.timezone('Asia/Shanghai')
-    timestamp = datetime.now(tz).strftime('%Y%m%d_%H%M%S')
-    
-    # 2. 定义过滤规则
-    # 排除非核心或流动性可能较差的冗余品种
-    blacklist = ['增强', '指数基金', '退市', '分级', 'C', 'E']
-    # 核心关注类别（用于在名称中匹配）
-    core_keywords = ['创业板', '科创', '沪深300', '上证50', '中证500', '中证1000', '纳指', '恒生', '医疗', '半导体', '新能源', '芯片']
-
-    def clean_df(df, code_col, name_col, size_col, is_shares=False):
-        # 转换规模：深市如果是“份”，假设净值约1元进行初步过滤（或直接按1亿份过滤）
-        df[size_col] = df[size_col].astype(str).str.replace(',', '').astype(float)
-        
-        # 规则1：规模过滤 (>= 1亿)
-        # 沪市单位是亿元，深市单位是份（1亿份通常对应1亿左右规模）
-        df = df[df[size_col] >= 1.0 if not is_shares else df[size_col] >= 100000000]
-        
-        # 规则2：关键词过滤 (去除增强、非核心字段)
-        mask_black = df[name_col].str.contains('|'.join(blacklist), na=False)
-        df = df[~mask_black]
-        
-        # 规则3：确保名称不为空
-        df = df.dropna(subset=[name_col])
-        
-        return df[[code_col, name_col]].rename(columns={code_col: '代码', name_col: '名称'})
-
-    print("正在读取并清理数据...")
-
-    # 处理沪市
+def load_etf_data():
+    """加载沪、深ETF数据"""
     try:
-        df_hu = pd.read_excel('ETF列表沪.xls')
-        res_hu = clean_df(df_hu, '基金代码', '基金简称', '最新规模(亿元)', is_shares=False)
+        # 读取沪市ETF数据
+        df_sh = pd.read_excel('ETF列表沪.xls')
+        print(f"沪市ETF数据加载成功，共 {len(df_sh)} 条记录")
+        
+        # 读取深市ETF数据
+        df_sz = pd.read_excel('ETF列表深.xlsx')
+        print(f"深市ETF数据加载成功，共 {len(df_sz)} 条记录")
+        
+        return df_sh, df_sz
+    except FileNotFoundError as e:
+        print(f"文件未找到: {e}")
+        sys.exit(1)
     except Exception as e:
-        print(f"沪市处理跳过: {e}")
-        res_hu = pd.DataFrame()
+        print(f"数据加载失败: {e}")
+        sys.exit(1)
 
-    # 处理深市
-    try:
-        df_shen = pd.read_excel('ETF列表深.xlsx')
-        res_shen = clean_df(df_shen, '证券代码', '证券简称', '当前规模(份)', is_shares=True)
-    except Exception as e:
-        print(f"深市处理跳过: {e}")
-        res_shen = pd.DataFrame()
-
-    # 3. 合并数据
-    df_final = pd.concat([res_hu, res_shen], ignore_index=True)
-    df_final['代码'] = df_final['代码'].astype(str).str.zfill(6)
-    df_final = df_final.drop_duplicates(subset=['代码'])
-
-    # 4. 保存结果
-    txt_output = f"ETF列表_{timestamp}.txt"
-    xlsx_output = f"ETF列表_{timestamp}.xlsx"
+def clean_etf_data(df_sh, df_sz):
+    """
+    清理ETF数据，去除流动性差、规模小的品种
+    筛选规则：
+    1. 去除最新规模小于1亿元的品种
+    2. 去除名称中包含"增强"、"指数基金"等非核心字段的冗余产品
+    3. 优先保留主流宽基、行业ETF和跨境ETF
+    """
     
-    df_final.to_csv(txt_output, sep='\t', index=False, encoding='utf-8')
-    df_final.to_excel(xlsx_output, index=False)
+    # 沪市ETF清理
+    # 转换规模列为数值类型
+    if '最新规模(亿元)' in df_sh.columns:
+        df_sh['最新规模(亿元)'] = pd.to_numeric(df_sh['最新规模(亿元)'], errors='coerce')
+        # 筛选规模大于1亿元的ETF
+        df_sh_filtered = df_sh[df_sh['最新规模(亿元)'] >= 1].copy()
+        print(f"沪市ETF规模筛选后剩余 {len(df_sh_filtered)} 条记录")
+    else:
+        df_sh_filtered = df_sh.copy()
     
-    # 覆盖简易名称以便其他程序读取
-    df_final.to_csv("ETF列表.txt", sep='\t', index=False, encoding='utf-8')
-    df_final.to_excel("ETF列表.xlsx", index=False)
+    # 深市ETF清理
+    if '当前规模(份)' in df_sz.columns:
+        # 深市数据单位是"份"，转换为亿元（假设1份=1元）
+        df_sz['当前规模(亿元)'] = df_sz['当前规模(份)'] / 100000000
+        df_sz_filtered = df_sz[df_sz['当前规模(亿元)'] >= 1].copy()
+        print(f"深市ETF规模筛选后剩余 {len(df_sz_filtered)} 条记录")
+    else:
+        df_sz_filtered = df_sz.copy()
+    
+    # 去除名称冗余的ETF
+    exclude_keywords = ['增强', '指数基金', '基金', 'ETF基金', 'ETF指数']
+    
+    def filter_by_name(df, name_col):
+        """根据名称关键词筛选"""
+        mask = ~df[name_col].astype(str).apply(
+            lambda x: any(keyword in x for keyword in exclude_keywords)
+        )
+        return df[mask]
+    
+    # 沪市名称筛选
+    if '基金简称' in df_sh_filtered.columns:
+        df_sh_cleaned = filter_by_name(df_sh_filtered, '基金简称')
+    elif '证券简称' in df_sh_filtered.columns:
+        df_sh_cleaned = filter_by_name(df_sh_filtered, '证券简称')
+    else:
+        df_sh_cleaned = df_sh_filtered
+    
+    # 深市名称筛选
+    if '证券简称' in df_sz_filtered.columns:
+        df_sz_cleaned = filter_by_name(df_sz_filtered, '证券简称')
+    else:
+        df_sz_cleaned = df_sz_filtered
+    
+    print(f"沪市ETF名称筛选后剩余 {len(df_sh_cleaned)} 条记录")
+    print(f"深市ETF名称筛选后剩余 {len(df_sz_cleaned)} 条记录")
+    
+    return df_sh_cleaned, df_sz_cleaned
 
-    print(f"清理完成。输出文件: {txt_output}")
-
-if __name__ == "__main__":
-    process_etf()
+def categorize_etfs(df_sh, df_sz):
+    """对ETF进行分类整理"""
+    
+    # 合并数据
+    all_etfs = []
+    
+    # 处理沪市ETF
+    for _, row in df_sh.iterrows():
+        etf_info = {
+            '证券代码': row.get('基金代码', row.get('证券代码', '')),
+            '证券简称': row.get('基金简称', row.get('证券简称', '')),
+            '标的指数': row.get('标的指数', ''),
+            '最新规模(亿元)': row.get('最新规模(亿元)', ''),
+            '基金管理人': row.get('基金管理人', ''),
