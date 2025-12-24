@@ -5,7 +5,7 @@ from datetime import datetime
 from multiprocessing import Pool, cpu_count
 
 # --- 核心参数 (绝对保持不变) ---
-RETR_WATCH = -10.0     
+RETR_WATCH = -9.0     
 RSI_LOW = 30           
 BIAS_LOW = -5.0        
 
