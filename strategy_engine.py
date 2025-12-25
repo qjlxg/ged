@@ -7,7 +7,7 @@ from multiprocessing import Pool, cpu_count
 
 # --- 核心参数 ---
 RETR_WINDOW = 250      
-RETR_WATCH = -10.0     
+RETR_WATCH = -15.0     
 RSI_LOW = 30           
 BIAS_LOW = -5.0        
 PORTFOLIO_UNIT = 2000  # 假设每只 3分信号基金 投入 2000元
