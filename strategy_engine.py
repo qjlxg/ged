@@ -177,7 +177,8 @@ def get_performance_stats():
 
             perf_list.append({
                 '日期': sig['date'], '代码': code, '名称': NAME_MAP.get(code, "未知"),
-                '评分': sig.get('评分', 1), '最新价': round(latest['收盘'], 4), 
+                '评分': sig.get('评分', 3), '建仓价': round(entry_p, 4),    # 新增：锁定信号触发时的价格
+                '最新价': round(latest['收盘'], 4), '最新价': round(latest_p, 4),   # 新增：锁定今天的收盘价
                 '最高浮盈%': round(max_profit, 2), '总盈亏%': round(total_change, 2),
                 '状态': "✅趋势向上" if not is_dead else "🚨趋势走弱",
                 '死叉': "YES" if is_dead else "NO"
