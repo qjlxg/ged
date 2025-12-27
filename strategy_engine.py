@@ -213,7 +213,7 @@ def update_readme(current_res, perf_df):
         perf_df['操作建议'] = perf_df.apply(decide_sell, axis=1)
         # 确保按日期降序排列，新机会在上面
         perf_df = perf_df.sort_values('日期', ascending=False)
-        content += perf_df[['日期', '代码', '名称', '评分', '最高浮盈%', '总盈亏%', '操作建议']].to_markdown(index=False) + "\n\n"
+        content += perf_df[['日期', '代码', '名称', '评分', '建仓价', '最新价', '最高浮盈%', '总盈亏%', '操作建议']].to_markdown(index=False) + "\n\n"
 
     with open('README.md', 'w', encoding='utf-8') as f: f.write(content)
 
