@@ -11,11 +11,11 @@ from multiprocessing import Pool, cpu_count
 TOTAL_BUDGET_CAP = 10000   # 1万本金总上限
 PORTFOLIO_UNIT = 2000      # 单笔抄底金额
 STOP_BUY_LOSS_RATIO = -5.0 # 组合总亏损超5%，开启禁买令
-RETR_WATCH = -10.0         # 回撤阈值锁定为 -20.0
+RETR_WATCH = -10.0         # 调整为-10%回调介入（原为-20%）
 RETR_WINDOW = 250          # 250日实战周期
 RSI_LOW = 30           
 BIAS_LOW = -5.0        
-LIQUIDITY_LIMIT = 10000000 # [新增建议控制] 日均成交额低于1000万不入池
+LIQUIDITY_LIMIT = 10000000 # 日均成交额低于1000万不入池
 
 # ==========================================
 # --- 2. 映射逻辑：加载 ETF 名称 ---
@@ -23,9 +23,7 @@ LIQUIDITY_LIMIT = 10000000 # [新增建议控制] 日均成交额低于1000万�
 def load_name_mapping():
     mapping = {}
     try:
-        # 读取上传的 ETF列表.txt，匹配证券代码和简称
         if os.path.exists('ETF列表.txt'):
-            # 兼容可能的编码格式
             try:
                 df_map = pd.read_csv('ETF列表.txt', sep='\t', dtype={'证券代码': str})
             except:
@@ -38,7 +36,6 @@ def load_name_mapping():
         print(f"名称映射加载失败: {e}")
     return mapping
 
-# 预加载全局映射表
 NAME_MAP = load_name_mapping()
 
 # ==========================================
@@ -52,69 +49,49 @@ def calculate_rsi(series, period=6):
     return 100 - (100 / (1 + rs.fillna(0)))
 
 def check_rsi_divergence(df, window=20):
-    """
-    RSI底背离检测：价格创出window日内新低，但RSI未创新低且显著回升
-    """
     if len(df) < window + 5: return False
     curr_price = df['收盘'].iloc[-1]
     curr_rsi = df['rsi'].iloc[-1]
-    
     lookback_df = df.iloc[-(window+1):-1]
     if lookback_df.empty: return False
-    
     min_price_idx = lookback_df['收盘'].idxmin()
     min_price_val = lookback_df['收盘'].min()
     min_price_rsi = lookback_df.loc[min_price_idx, 'rsi']
-    
-    # 底背离判断条件
     if curr_price <= min_price_val and curr_rsi > min_price_rsi + 2:
         return True
     return False
 
 # ==========================================
-# --- 4. 单文件处理 (适配中文表头与增强清洗) ---
+# --- 4. 单文件处理 (包含数据清洗) ---
 # ==========================================
 def process_file(file_path):
     try:
         try: df = pd.read_csv(file_path, encoding='utf-8')
         except: df = pd.read_csv(file_path, encoding='gbk')
-        
-        # 兼容性处理：如果列名是 net_value 则替换为收盘，date 替换为日期
         if 'net_value' in df.columns:
             df = df.rename(columns={'date': '日期', 'net_value': '收盘'})
-        
-        # 基础校验
-        if '日期' not in df.columns or '收盘' not in df.columns:
-            return None
+        if '日期' not in df.columns or '收盘' not in df.columns: return None
 
         df['日期'] = pd.to_datetime(df['日期'])
         df = df.sort_values(by='日期').reset_index(drop=True)
-        
-        # --- 数据清洗与流动性过滤 ---
         if len(df) < 30: return None
         
-        # 1. 流动性拦截 (僵尸ETF过滤)
+        # 流动性过滤
         if '成交额' in df.columns:
             avg_amount = df['成交额'].iloc[-5:].mean()
             if avg_amount < LIQUIDITY_LIMIT: return None
 
         curr_p = df['收盘'].iloc[-1]
         prev_p = df['收盘'].iloc[-2]
-        
-        # 2. 异常跳变拦截 (如数据缺失回归1.0)
-        if curr_p == 1.0 and prev_p > 1.1: return None
-        
-        # 3. 波动率异动监控 (单日超9%标记异常)
+        if curr_p == 1.0 and prev_p > 1.1: return None # 异常数据过滤
         is_vol_alert = abs((curr_p - prev_p) / prev_p) > 0.09
         
-        # 计算基础指标
         df['rsi'] = calculate_rsi(df['收盘'], 6)
         df['ma6'] = df['收盘'].rolling(window=6).mean()
         df['bias'] = ((df['收盘'] - df['ma6']) / df['ma6']) * 100
         df['max_high'] = df['收盘'].rolling(window=RETR_WINDOW).max()
         df['retr'] = ((df['收盘'] - df['max_high']) / df['max_high']) * 100
         
-        # 信号判定逻辑
         df['in_watch'] = df['retr'] <= RETR_WATCH
         df['persist_days'] = df['in_watch'].groupby((df['in_watch'] != df['in_watch'].shift()).cumsum()).cumcount() + 1
         df.loc[~df['in_watch'], 'persist_days'] = 0
@@ -128,7 +105,7 @@ def process_file(file_path):
             divergence = check_rsi_divergence(df)
             if curr['rsi'] < RSI_LOW: score += 2
             if curr['bias'] < BIAS_LOW: score += 2
-            if divergence: score += 2  # 背离额外加分
+            if divergence: score += 2
             
             risk_level = "正常"
             if is_vol_alert: risk_level = "⚠️数据异动"
@@ -152,7 +129,7 @@ def process_file(file_path):
     except: return None
 
 # ==========================================
-# --- 5. 盈亏统计模块 (加入最高浮盈计算) ---
+# --- 5. 盈亏统计与最高浮盈记录 ---
 # ==========================================
 def get_performance_stats():
     history_files = glob.glob('202*/**/*.csv', recursive=True)
@@ -165,10 +142,8 @@ def get_performance_stats():
                 code = str(sig['fund_code']).zfill(6)
                 raw_path = f'fund_data/{code}.csv'
                 if not os.path.exists(raw_path): continue
-                
                 try: raw_df = pd.read_csv(raw_path, encoding='utf-8')
                 except: raw_df = pd.read_csv(raw_path, encoding='gbk')
-                
                 if 'net_value' in raw_df.columns: raw_df = raw_df.rename(columns={'date': '日期', 'net_value': '收盘'})
                 raw_df['日期'] = pd.to_datetime(raw_df['日期']).dt.strftime('%Y-%m-%d')
                 
@@ -176,28 +151,17 @@ def get_performance_stats():
                 if not idx_list.empty:
                     curr_idx = idx_list[0]
                     signal_price = sig['price']
-                    
-                    # 获取信号发出后的轨迹
                     after_signal_df = raw_df.iloc[curr_idx:]
                     latest_price = after_signal_df['收盘'].iloc[-1]
-                    
-                    # 统计端清洗
-                    if latest_price == 1.0 and signal_price > 1.1: continue
-                    
-                    # 【核心新增】计算最高浮盈
                     max_price_after = after_signal_df['收盘'].max()
                     max_profit = (max_price_after - signal_price) / signal_price * 100
                     
-                    # 计算今日涨跌
                     prev_price = raw_df.iloc[-2]['收盘'] if len(raw_df) > 1 else latest_price
                     daily_raw = (latest_price - prev_price) / prev_price * 100
                     color_tag = "🔴 " if daily_raw > 0 else "🟢 " if daily_raw < 0 else ""
                     daily_display = f"{color_tag}{daily_raw:+.2f}%"
-                    
-                    # 计算当前总盈亏
                     total_hold_change = (latest_price - signal_price) / signal_price * 100
                     
-                    # 计算回本天数
                     recovery_df = raw_df.iloc[curr_idx+1:]
                     back_days = "未回本"
                     back_idx = recovery_df[recovery_df['收盘'] >= signal_price].index
@@ -215,13 +179,14 @@ def get_performance_stats():
     return pd.DataFrame(perf_list)
 
 # ==========================================
-# --- 6. 报告生成 (北京时间版) ---
+# --- 6. 核心止盈决策与报告生成 ---
 # ==========================================
 def update_readme(current_res, perf_df):
     now_utc = datetime.now(timezone.utc)
     now_bj = (now_utc + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
     
     content = f"# 🤖 ETF/基金 策略雷达 (250日实战锁死版)\n\n> 最后更新: `{now_bj}` (北京时间)\n\n"
+    content += "### 🚩 战法铁律：\n- **组合总浮盈 > 3%**：开始寻找卖点，不看买点。\n- **宁愿卖飞**：绝不参与 14:30 后的盲目冲高。\n- **止盈分级**：+5% 减 1/3，回吐 3% 强制结账，死叉全清。\n\n"
     
     total_invested = 0
     total_profit_loss_val = 0
@@ -229,7 +194,6 @@ def update_readme(current_res, perf_df):
     is_budget_full = False
     is_panic_mode = False
 
-    # 预先计算风控状态
     if not perf_df.empty:
         recent_limit = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
         active_focus = perf_df[(perf_df['评分'] >= 3) & (perf_df['日期'] >= recent_limit)].drop_duplicates(subset=['代码'])
@@ -242,31 +206,47 @@ def update_readme(current_res, perf_df):
             is_panic_mode = avg_return_rate <= STOP_BUY_LOSS_RATIO
 
             content += "## 💰 实战风控盘口 (1万资金上限)\n"
-            content += f"> **模拟投入**: `¥{total_invested} / ¥{TOTAL_BUDGET_CAP}` | **总盈亏**: `{'🔴' if total_profit_loss_val > 0 else '🟢'} ¥{total_profit_loss_val:.2f} ({avg_return_rate:+.2f}%)` \n"
+            house_tag = "🔴 " if total_profit_loss_val > 0 else "🟢 "
+            content += f"> **模拟投入**: `¥{total_invested} / ¥{TOTAL_BUDGET_CAP}` | **总盈亏**: `{house_tag} ¥{total_profit_loss_val:.2f} ({avg_return_rate:+.2f}%)` \n"
             status_desc = "🛡️ 预算内" if not is_budget_full else "⛔ 预算满员"
             if is_panic_mode: status_desc += " | ❌ 禁买令 (总亏损过大)"
             content += f"> **风控状态**: `{status_desc}`\n\n"
 
-    content += "## 🎯 实时信号监控 (-20%阈值 + 底背离检测)\n"
+    content += "## 🎯 实时信号监控 (-10%阈值 + 底背离)\n"
     if current_res:
         df = pd.DataFrame(current_res).sort_values(['评分', '回撤%'], ascending=[False, True])
-        def decide(row):
+        def decide_buy(row):
             if row['评分'] < 3: return "等待3分"
             if is_budget_full: return "⛔ 预算上限"
-            if is_panic_mode: return "❌ 组合亏损(停买)"
+            if is_panic_mode: return "❌ 组合亏损"
             return "✅ 可分批建仓"
-        df['建议'] = df.apply(decide, axis=1)
+        df['建议'] = df.apply(decide_buy, axis=1)
         cols = ['date', 'fund_code', '名称', '评分', '持续天数', '风险预警', '回撤%', 'RSI', 'BIAS', 'price', '建议']
         content += df[cols].to_markdown(index=False) + "\n\n"
     else:
-        content += "> 💤 当前无触发 -20% 回撤阈值的品种。\n\n"
+        content += "> 💤 当前无触发回撤阈值的品种。\n\n"
 
-    content += "## 🔥 活跃买点追踪 (含最高浮盈记录)\n"
+    content += "## 🔥 活跃买点追踪 (含动态止盈提醒)\n"
     if not perf_df.empty:
         recent_limit = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
-        active_focus = perf_df[(perf_df['评分'] >= 3) & (perf_df['日期'] >= recent_limit)].sort_values('日期', ascending=False).drop_duplicates(subset=['代码'])
+        active_focus = perf_df[(perf_df['评分'] >= 3) & (perf_df['日期'] >= recent_limit)].sort_values('日期', ascending=False).drop_duplicates(subset=['代码']).copy()
+        
         if not active_focus.empty:
-            cols = ['日期', '代码', '名称', '评分', '信号价', '最新价', '今日涨跌', '最高浮盈%', '总盈亏%', '状态', '回本天数']
+            # --- 核心动态止盈逻辑 ---
+            def decide_sell(row):
+                if row['总盈亏%'] < -5.0: return "💀 硬损离场"
+                # 利润回吐超过3%报警
+                if row['最高浮盈%'] > 8.0 and row['总盈亏%'] < (row['最高浮盈%'] - 3.0):
+                    return "🚨 利润回吐，强制结账"
+                # 分级止盈建议
+                if row['总盈亏%'] >= 5.0 and row['总盈亏%'] < 8.0:
+                    return "💰 建议减仓 1/3"
+                if row['总盈亏%'] >= 8.0:
+                    return "💎 极强波段，保持关注"
+                return row['状态']
+
+            active_focus['操作建议'] = active_focus.apply(decide_sell, axis=1)
+            cols = ['日期', '代码', '名称', '评分', '信号价', '最新价', '今日涨跌', '最高浮盈%', '总盈亏%', '操作建议', '回本天数']
             content += active_focus[cols].to_markdown(index=False) + "\n\n"
 
     with open('README.md', 'w', encoding='utf-8') as f: f.write(content)
