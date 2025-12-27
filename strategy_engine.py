@@ -146,9 +146,8 @@ def get_performance_stats():
     # 合并所有历史信号并按日期排序
     full_history = pd.concat(temp_dfs).sort_values('date')
     
-    # 【核心逻辑】：按代码去重，保留该品种最早出现的日期作为“建仓点”
-    # 这样既能找回前几天的记录，又不会让表格变乱
-    unique_signals = full_history.drop_duplicates(subset=['fund_code'], keep='first')
+
+    unique_signals = full_history[full_history['评分'] >= 3].drop_duplicates(subset=['fund_code'], keep='first')
     
     perf_list = []
     for _, sig in unique_signals.iterrows():
