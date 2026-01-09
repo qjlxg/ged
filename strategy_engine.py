@@ -40,9 +40,13 @@ NAME_MAP = load_name_mapping()
 # --- 3. 增强版技术指标模块 ---
 # ==========================================
 def calculate_rsi(series, period=6):
+    """
+    修正建议 C：使用 Wilder's Smoothing (EWM) 替代简单平均
+    """
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    # 使用指数加权移动平均 (EWM) 提高指标灵敏度与稳定性
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
     rs = gain / loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs.fillna(0)))
 
@@ -77,7 +81,12 @@ def process_file(file_path):
         df = df.sort_values(by='日期').reset_index(drop=True)
         if len(df) < 60: return None 
         
-        if '成交额' in df.columns and df['成交额'].iloc[-5:].mean() < LIQUIDITY_LIMIT: return None
+        # 修正建议 A：增强流动性过滤的稳定性
+        if '成交额' in df.columns:
+            if len(df) >= 5:
+                recent_vol = df['成交额'].iloc[-5:].mean()
+                if recent_vol < LIQUIDITY_LIMIT: return None
+            else: return None
 
         # 计算增强指标
         df['rsi6'] = calculate_rsi(df['收盘'], 6)
@@ -90,7 +99,6 @@ def process_file(file_path):
         df['retr'] = ((df['收盘'] - df['max_high']) / df['max_high']) * 100
         
         df['in_watch'] = df['retr'] <= RETR_WATCH
-        # 原有 persist_days 计算
         df['persist_days'] = df['in_watch'].groupby((df['in_watch'] != df['in_watch'].shift()).cumsum()).cumcount() + 1
         df.loc[~df['in_watch'], 'persist_days'] = 0
 
@@ -124,7 +132,7 @@ def process_file(file_path):
     except: return None
 
 # ==========================================
-# --- 5. 盈亏统计 (去重过滤与价格补全) ---
+# --- 5. 盈亏统计 (修正建议 D：动态去重) ---
 # ==========================================
 def get_performance_stats():
     history_files = glob.glob('202*/**/*.csv', recursive=True)
@@ -133,17 +141,18 @@ def get_performance_stats():
         if 'perf' in h_file: continue
         try:
             temp_df = pd.read_csv(h_file)
-            # 兼容旧列名，防止乱码或NaN
             temp_df = temp_df.rename(columns={'RSI': 'RSI6', 'BIAS': 'BIAS20'})
             all_raw_signals.append(temp_df)
         except: continue
     
     if not all_raw_signals: return pd.DataFrame()
     
-    full_df = pd.concat(all_raw_signals).sort_values('date')
+    full_df = pd.concat(all_raw_signals).sort_values(['date', '评分'])
     
-    # 核心要求：只买3分的标的，且保留最早记录
-    unique_signals = full_df[full_df['评分'] >= 3].drop_duplicates(subset=['fund_code'], keep='first')
+    # 修正建议 D：如果同一个标的后续评分更高，则更新建仓基准（应对阴跌）
+    # 逻辑：按代码分组，取评分最高的一次；若评分相同，取最早的一次
+    unique_signals = full_df[full_df['评分'] >= 3].sort_values(['评分', 'date'], ascending=[False, True])
+    unique_signals = unique_signals.drop_duplicates(subset=['fund_code'], keep='first')
     
     perf_list = []
     for _, sig in unique_signals.iterrows():
@@ -173,8 +182,8 @@ def get_performance_stats():
             perf_list.append({
                 '日期': sig['date'], '代码': code, '名称': NAME_MAP.get(code, "未知"),
                 '评分': sig.get('评分', 3), 
-                '建仓价': round(entry_price, 4), # 新增
-                '最新价': round(latest_price, 4), # 新增
+                '建仓价': round(entry_price, 4), 
+                '最新价': round(latest_price, 4), 
                 '最高浮盈%': round(max_profit, 2), 
                 '总盈亏%': round(curr_profit, 2),
                 '状态': "✅趋势向上" if not is_dead_cross else "🚨趋势走弱",
@@ -188,8 +197,8 @@ def get_performance_stats():
 # ==========================================
 def update_readme(current_res, perf_df):
     now_bj = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
-    content = f"# 🤖 ETF/基金 策略雷达 (原版功能无损版)\n\n> 最后更新: `{now_bj}`\n\n"
-    content += "### 🚩 战法铁律：\n- **双RSI共振**：RSI6 < 30 且 RSI14 < 40 确认为真底部。\n- **趋势止盈**：浮盈 > 5% 后，出现 **均线死叉** 或 **利润回吐3%** 强制离场。\n\n"
+    content = f"# 🤖 ETF/基金 策略雷达 (优化增强版)\n\n> 最后更新: `{now_bj}`\n\n"
+    content += "### 🚩 战法铁律：\n- **Wilder RSI 共振**：采用 EWM 平滑算法，过滤波动噪音。\n- **动态基准更新**：若下跌过程中评分提升，自动下移建仓参考价。\n- **趋势止盈**：浮盈 > 5% 后，出现 **均线死叉** 或 **利润回吐3%** 强制离场。\n\n"
     
     if not perf_df.empty:
         total_p = (perf_df['总盈亏%'] / 100 * PORTFOLIO_UNIT).sum()
@@ -199,12 +208,11 @@ def update_readme(current_res, perf_df):
     content += "## 🎯 实时信号 (双指标共振)\n"
     if current_res:
         df = pd.DataFrame(current_res).sort_values(['评分', '回撤%'], ascending=[False, True])
-        # 保留原有的风险预警、RSI6、BIAS20、ma5_trend等列名
         show_cols = ['date', 'fund_code', '名称', '评分', '风险预警', '回撤%', 'RSI6', 'BIAS20', 'price']
         if 'ma5_trend' in df.columns: show_cols.append('ma5_trend')
         content += df[show_cols].to_markdown(index=False) + "\n\n"
 
-    content += "## 🔥 活跃买点 (评分>=3 价格追踪)\n"
+    content += "## 🔥 活跃买点 (动态基准追踪)\n"
     if not perf_df.empty:
         def decide_sell(row):
             if row['总盈亏%'] >= 5.0 and row['死叉'] == "YES": return "🚨 趋势反转，清仓！"
@@ -213,7 +221,6 @@ def update_readme(current_res, perf_df):
         
         perf_df['操作建议'] = perf_df.apply(decide_sell, axis=1)
         perf_df = perf_df.sort_values('日期', ascending=False)
-        # 严格按照您的要求展示两列价格
         content += perf_df[['日期', '代码', '名称', '评分', '建仓价', '最新价', '最高浮盈%', '总盈亏%', '操作建议']].to_markdown(index=False) + "\n\n"
 
     with open('README.md', 'w', encoding='utf-8') as f: f.write(content)
@@ -230,7 +237,6 @@ def main():
         now = datetime.now()
         folder = now.strftime('%Y/%m')
         os.makedirs(folder, exist_ok=True)
-        # 原封不动保存今日信号
         pd.DataFrame(results).to_csv(f"{folder}/sig_{now.strftime('%d_%H%M%S')}.csv", index=False)
     update_readme(results, get_performance_stats())
 
