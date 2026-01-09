@@ -2,13 +2,13 @@ name: etf_grid_hunter
 
 on:
   schedule:
-    # 北京时间 15:30 对应 UTC 时间 07:30
-    - cron: '45 7 * * *'
+    # 每日北京时间 15:40 (15:30收盘后数据更新大约10分钟延迟)
+    - cron: '40 7 * * *'
   push:
     paths:
       - 'etf_grid_hunter.py'
       - '.github/workflows/etf_grid_hunter.yml'
-  workflow_dispatch: # 支持手动运行
+  workflow_dispatch:
 
 jobs:
   build:
@@ -16,8 +16,6 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
-        with:
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -25,24 +23,22 @@ jobs:
           python-version: '3.9'
 
       - name: Install Dependencies
-        run: |
-          pip install pandas
+        run: pip install pandas
 
-      - name: Run Strategy
+      - name: Run Grid Hunter
         run: |
-          # 设置时区为上海
           export TZ='Asia/Shanghai'
           python etf_grid_hunter.py
 
-      - name: Commit and Push
+      - name: Commit and Push Results
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
+          # 检查生成的年月目录是否存在新文件
           git add .
-          # 检查是否有新文件产生，避免无变动时报错
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
+          if git diff --cached --quiet; then
+            echo "No changes detected. Analysis did not find new targets."
           else
-            git commit -m "Auto Update ETF Analysis: $(date +'%Y-%m-%d %H:%M')"
+            git commit -m "Auto: 战法复盘分析 $(date +'%Y-%m-%d %H:%M')"
             git push
           fi
