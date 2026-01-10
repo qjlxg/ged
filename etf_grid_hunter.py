@@ -6,7 +6,8 @@ from datetime import datetime
 from multiprocessing import Pool, cpu_count
 
 # ==============================================================================
-# 战法说明：RSI-BOLL-VOLUME 终极胜率增强版 (3万元实盘专用)
+# 战法说明：RSI-BOLL-VOLUME 终极胜率增强版 
+# 包含：MA20动态中轴、RSI风险锁、分级加码、安全防护、横盘天数、变盘预警
 # ==============================================================================
 DATA_DIR = 'fund_data'
 ETF_LIST_FILE = 'ETF列表.xlsx' 
@@ -20,7 +21,6 @@ def calculate_rsi(series, period=14):
 
 def analyze_fund(file_path):
     try:
-        # 读取 100 行确保 MA20 和 RSI 准确
         df = pd.read_csv(file_path, encoding='utf-8-sig').tail(100)
         if len(df) < 30: return None
         df.columns = [c.strip() for c in df.columns]
@@ -28,30 +28,23 @@ def analyze_fund(file_path):
         latest = df.iloc[-1]
         close_series = df['收盘']
         
-        # --- [逻辑 4 & 新 2：安全防护与换手率] ---
+        # --- [基础防护逻辑] ---
         turnover_raw = latest.get('换手率', 0)
         try:
             turnover = float(str(turnover_raw).replace('%', ''))
         except:
             turnover = 0
-            
-        # 严格执行 1000万成交额 + 0.1% 换手率过滤
-        if latest['成交额'] < 10000000 or turnover < 0.1:
-            return None
+        if latest['成交额'] < 10000000 or turnover < 0.1: return None
 
-        # --- [技术指标计算] ---
+        # --- [指标计算] ---
         ma20_series = close_series.rolling(20).mean()
         ma20 = ma20_series.iloc[-1]
         rsi_val = calculate_rsi(close_series).iloc[-1]
         avg_amp = df['振幅'].tail(20).mean()
-        
-        # 新 3：乖离率 (Bias)
         bias = (latest['收盘'] - ma20) / ma20 * 100
-        # 新 1：量比 (成交额协同)
         vol_ratio = latest['成交额'] / (df['成交额'].tail(5).mean() + 1e-9)
 
-        # --- [新 4：横盘天数逻辑] ---
-        # 判定标准：价格偏离 MA20 在 ±2% 范围内
+        # --- [横盘天数统计] ---
         diff_pct = (close_series - ma20_series) / ma20_series
         is_sideways = diff_pct.abs() < 0.02
         sideways_days = 0
@@ -59,68 +52,62 @@ def analyze_fund(file_path):
             if val: sideways_days += 1
             else: break
 
-        # --- [逻辑 2 & 5：风险锁与套利空间剔除] ---
-        # RSI > 70 强制剔除 (逻辑 2)；振幅 < 1.2% 剔除 (逻辑 5)
-        if rsi_val > 70 or avg_amp < 1.2:
-            return None
+        # --- [新增：横盘陷阱判定逻辑] ---
+        sideways_type = "动态波动"
+        if sideways_days >= 3:
+            # 均线最近5天的方向 (斜率)
+            slope = (ma20_series.iloc[-1] - ma20_series.iloc[-5]) / 5
+            if bias < 0.5 and slope <= 0:
+                sideways_type = "低位筑底✅"
+            elif bias > 2.0:
+                sideways_type = "高位派发⚠️"
+            else:
+                sideways_type = "中继整理"
 
-        # --- [逻辑 1 & 3：状态判定] ---
-        status = "正常震荡"
-        action = "常规网格"
-        weight = "1.0x"
-        star = "★★★☆☆" 
-        
-        # 逻辑 1：动态中轴
+        # --- [风险锁与胜率判定] ---
+        if rsi_val > 70 or avg_amp < 1.2: return None
+
+        status, action, weight, star = "正常震荡", "常规网格", "1.0x", "★★★☆☆"
         boll_pos = "中轨上方(看强)" if latest['收盘'] > ma20 else "中轨下方(看弱)"
         
-        # 逻辑 2 & 3 & 新 1：机会区与金底判定
+        # 降级逻辑：如果是高位派发风险，即便其他条件好，也将胜率降级
+        if sideways_type == "高位派发⚠️":
+            star = "★★☆☆☆"
+            action = "警惕回撤/减量网格"
+
         if rsi_val < 35:
-            status = "🔥机会区"
+            status, star = "🔥机会区", "★★★★☆"
             if rsi_val < 30:
-                status = "🚨超卖加码区"
-                action = "暂停卖出/只买不卖"
-                weight = "1.5x - 2.0x"
-                star = "★★★★☆"
-                
-                # 新 1 + 新 3：量价协同金底
+                status, action, weight, star = "🚨超卖加码区", "暂停卖出/只买不卖", "1.5x - 2.0x", "★★★★☆"
                 if vol_ratio > 1.1 and bias < -3:
-                    status = "💎五星金底"
-                    star = "★★★★★"
-                    action = "强力加码/只买不卖"
+                    status, star, action = "💎五星金底", "★★★★★", "强力加码/只买不卖"
 
         code = os.path.basename(file_path).replace('.csv', '')
         return {
             '证券代码': code,
             '收盘价': latest['收盘'],
-            '成交额(万)': round(latest['成交额'] / 10000, 2),
-            '换手率%': round(turnover, 2),
-            '量比': round(vol_ratio, 2),
             'RSI(14)': round(rsi_val, 2),
             '乖离率%': round(bias, 2),
             '横盘天数': sideways_days,
+            '横盘性质': sideways_type,
             '网格状态': status,
             '胜率置信度': star,
-            '布林位置': boll_pos,
             '建议操作': action,
             '加码倍数': weight,
-            '20日均振幅%': round(avg_amp, 2),
-            '中轨(MA20)': round(ma20, 3)
+            '成交额(万)': round(latest['成交额'] / 10000, 2),
+            '20日均振幅%': round(avg_amp, 2)
         }
-    except Exception:
-        return None
+    except Exception: return None
 
 def main():
-    # 自动识别并加载白名单 (兼容 Excel 和多种编码的 CSV)
+    # ... (保持原有的加载白名单和并行处理逻辑不变)
     if not os.path.exists(ETF_LIST_FILE):
         alt_csv = ETF_LIST_FILE.replace('.xlsx', '.csv')
         target_file = alt_csv if os.path.exists(alt_csv) else None
         if not target_file: return
-    else:
-        target_file = ETF_LIST_FILE
-
+    else: target_file = ETF_LIST_FILE
     try:
-        if target_file.endswith('.xlsx'):
-            name_df = pd.read_excel(target_file, engine='openpyxl')
+        if target_file.endswith('.xlsx'): name_df = pd.read_excel(target_file, engine='openpyxl')
         else:
             for enc in ['utf-8-sig', 'gbk', 'utf-8']:
                 try:
@@ -143,16 +130,16 @@ def main():
     final_df['证券简称'] = final_df['证券代码'].apply(lambda x: name_map[x])
     
     # 按照置信度、横盘天数、RSI 排序
-    cols = ['证券代码', '证券简称', '收盘价', '成交额(万)', 'RSI(14)', '量比', '乖离率%', '横盘天数',
-            '网格状态', '胜率置信度', '布林位置', '建议操作', '加码倍数', '20日均振幅%']
-    final_df = final_df[cols].sort_values(['胜率置信度', '横盘天数', 'RSI(14)'], ascending=[False, False, True])
+    cols = ['证券代码', '证券简称', '收盘价', 'RSI(14)', '乖离率%', '横盘天数', '横盘性质',
+            '网格状态', '胜率置信度', '建议操作', '加码倍数', '成交额(万)', '20日均振幅%']
+    final_df = final_df[cols].sort_values(['胜率置信度', '横盘天数'], ascending=[False, False])
     
     now = datetime.now()
     dir_path = now.strftime('%Y/%m')
     os.makedirs(dir_path, exist_ok=True)
     save_path = os.path.join(dir_path, f"best_buy_{now.strftime('%Y%m%d')}.csv")
     final_df.to_csv(save_path, index=False, encoding='utf-8-sig')
-    print(f"✅ 扫描完成：共发现 {len(final_df)} 个符合标准的标的。")
+    print(f"✅ 扫描完成：{save_path}")
 
 if __name__ == "__main__":
     main()
