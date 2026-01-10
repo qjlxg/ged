@@ -197,7 +197,7 @@ def get_performance_stats():
 # ==========================================
 def update_readme(current_res, perf_df):
     now_bj = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
-    content = f"# 🤖 ETF/基金 策略雷达 (优化增强版)\n\n> 最后更新: `{now_bj}`\n\n"
+    content = f"# 🤖  策略雷达 (优化增强版)\n\n> 最后更新: `{now_bj}`\n\n"
     content += "### 🚩 战法铁律：\n- **Wilder RSI 共振**：采用 EWM 平滑算法，过滤波动噪音。\n- **动态基准更新**：若下跌过程中评分提升，自动下移建仓参考价。\n- **趋势止盈**：浮盈 > 5% 后，出现 **均线死叉** 或 **利润回吐3%** 强制离场。\n\n"
     
     if not perf_df.empty:
