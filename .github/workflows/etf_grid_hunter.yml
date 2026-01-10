@@ -23,7 +23,7 @@ jobs:
           python-version: '3.9'
 
       - name: Install Dependencies
-        run: pip install pandas
+        run: pip install pandas openpyxl
 
       - name: Run Grid Hunter
         run: |
