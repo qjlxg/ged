@@ -21,7 +21,7 @@ from multiprocessing import Pool, cpu_count
 # ==============================================================================
 
 DATA_DIR = 'fund_data'
-ETF_LIST_FILE = 'ETF列表.xlsx - Sheet1.csv'
+ETF_LIST_FILE = 'ETF列表.xlsx'
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
