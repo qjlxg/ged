@@ -21,7 +21,7 @@ from multiprocessing import Pool, cpu_count
 # ==============================================================================
 
 DATA_DIR = 'fund_data'
-ETF_LIST_FILE = 'ETF列表.xlsx'
+ETF_LIST_FILE = 'ETF列表.xlsx' # 脚本会自动尝试读取 .xlsx 或 .csv
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -41,8 +41,13 @@ def analyze_fund(file_path):
         close_series = df['收盘']
         
         # --- [逻辑 4 & 新增因子 2：安全与换手率防护] ---
-        # 必须满足：成交额 > 1000万 且 换手率 > 0.1%
-        turnover = latest.get('换手率', 0)
+        # 换手率清洗，防止出现带百分号的字符串
+        turnover_raw = latest.get('换手率', 0)
+        try:
+            turnover = float(str(turnover_raw).replace('%', ''))
+        except:
+            turnover = 0
+            
         if latest['成交额'] < 10000000 or turnover < 0.1:
             return None
 
@@ -53,12 +58,10 @@ def analyze_fund(file_path):
         
         # 新增因子 3：乖离率 (Bias) = (现价 - MA20) / MA20
         bias = (latest['收盘'] - ma20) / ma20 * 100
-        
         # 新增因子 1：量比 (今日成交额 / 5日均额)
         vol_ratio = latest['成交额'] / (df['成交额'].tail(5).mean() + 1e-9)
 
         # --- [逻辑 2 & 逻辑 5：核心剔除标准] ---
-        # 剔除 RSI > 70 (超买只卖不买) 和 振幅 < 1.2% (无套利空间)
         if rsi_val > 70 or avg_amp < 1.2:
             return None
 
@@ -66,12 +69,10 @@ def analyze_fund(file_path):
         status = "正常震荡"
         action = "常规网格"
         weight = "1.0x"
-        star = "★★★☆☆" # 基础胜率
+        star = "★★★☆☆" 
         
-        # 判定布林位置 (逻辑 1)
         boll_pos = "中轨上方(看强)" if latest['收盘'] > ma20 else "中轨下方(看弱)"
         
-        # 触发机会区 (逻辑 2 & 3)
         if rsi_val < 35:
             status = "🔥机会区"
             if rsi_val < 30:
@@ -80,7 +81,6 @@ def analyze_fund(file_path):
                 weight = "1.5x - 2.0x"
                 star = "★★★★☆"
                 
-                # [胜率增强：量价协同因子]
                 if vol_ratio > 1.1 and bias < -3:
                     status = "💎五星金底"
                     star = "★★★★★"
@@ -107,14 +107,40 @@ def analyze_fund(file_path):
         return None
 
 def main():
-    # 白名单加载 (逻辑 4)
+    # --- [白名单加载逻辑：增加 Excel/CSV 自动识别与编码修复] ---
     if not os.path.exists(ETF_LIST_FILE):
-        print(f"缺失白名单文件: {ETF_LIST_FILE}")
-        return
-    name_df = pd.read_csv(ETF_LIST_FILE, encoding='utf-8-sig')
-    name_df['证券代码'] = name_df['证券代码'].astype(str).str.zfill(6)
-    name_map = dict(zip(name_df['证券代码'], name_df['证券简称']))
+        # 兜底检查：如果设置了 .xlsx 但实际存在的是 .csv
+        alt_csv = ETF_LIST_FILE.replace('.xlsx', '.csv')
+        if os.path.exists(alt_csv):
+            target_file = alt_csv
+        else:
+            print(f"缺失白名单文件: {ETF_LIST_FILE}")
+            return
+    else:
+        target_file = ETF_LIST_FILE
 
+    print(f"📂 正在加载白名单: {target_file}")
+    try:
+        if target_file.endswith('.xlsx'):
+            name_df = pd.read_excel(target_file, engine='openpyxl')
+        else:
+            # 尝试多种编码读取 CSV，彻底解决 UnicodeDecodeError
+            for enc in ['utf-8-sig', 'gbk', 'utf-8', 'gb18030']:
+                try:
+                    name_df = pd.read_csv(target_file, encoding=enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+        
+        # 统一格式化列名和代码列
+        name_df.columns = [c.strip() for c in name_df.columns]
+        name_df['证券代码'] = name_df['证券代码'].astype(str).str.zfill(6)
+        name_map = dict(zip(name_df['证券代码'], name_df['证券简称']))
+    except Exception as e:
+        print(f"❌ 读取白名单失败: {e}")
+        return
+
+    # --- [并行扫描部分] ---
     csv_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
     print(f"📡 正在扫描 {len(csv_files)} 个标的...")
     
@@ -130,7 +156,6 @@ def main():
     final_df = pd.DataFrame(valid)
     final_df['证券简称'] = final_df['证券代码'].apply(lambda x: name_map[x])
     
-    # 按照胜率和RSI排序，最值得买的排在最前面
     cols = ['证券代码', '证券简称', '收盘价', '成交额(万)', 'RSI(14)', '量比', '乖离率%', 
             '网格状态', '胜率置信度', '布林位置', '建议操作', '加码倍数', '20日均振幅%']
     final_df = final_df[cols].sort_values(['胜率置信度', 'RSI(14)'], ascending=[False, True])
