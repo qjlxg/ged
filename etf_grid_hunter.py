@@ -48,7 +48,7 @@ def analyze_fund(file_path):
         signal_type, reason, is_buy = "观望", "正常波动", False
 
         # 买入依据：极度冷清 + 价格跌破位
-        if rsi_val < 38:
+        if rsi_val < 68:#rsi_val < 38
             signal_type, reason, is_buy = "建议买入", "情绪冰点/低位建仓", True
             if rsi_val < 32: reason = "严重超跌/黄金底"
         # 卖出依据：情绪过热 或 缩量拉升（诱多）
