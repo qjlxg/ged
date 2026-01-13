@@ -58,7 +58,7 @@ def analyze_fund(file_path):
         signal_type, reason, is_buy = "观望", "震荡区域", False
 
         # 买入信号判定：必须同时满足超跌和情绪冰点
-        if rsi_val < 38:
+        if rsi_val < 68:
             signal_type, reason, is_buy = "建议买入", "情绪冰点/低位建仓", True
             if rsi_val < 32:
                 reason = "严重超跌/黄金坑"
