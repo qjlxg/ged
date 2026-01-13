@@ -6,16 +6,15 @@ from datetime import datetime
 from multiprocessing import Pool, cpu_count
 
 # ==============================================================================
-# 战法说明：Alpha Hunter V8.2 终极实战归档版
-# 1. [核心依据]：RSI(情绪)、BIAS(乖离)、VOLUME(量价验证)、ATR(波动适配)
-# 2. [结果排序]：买入清单置顶，按 RSI 由冷到热(从小到大)排序
-# 3. [自动归档]：决策自动存入 results/年/月/scan_日期.csv
-# 4. [名称映射]：所有输出字段均包含“简称”，方便快速识别
+# 战法说明：Alpha Hunter V8.5 终极实战版
+# 1. [判定维度]：RSI(情绪)、BIAS(均线引力)、VOLUME(量价真伪)、ATR(波动性格)
+# 2. [存储逻辑]：每日建议存入 results/年/月/ 目录；胜率账本 signal_tracker.csv 持续累加
+# 3. [排序映射]：买入在前并按 RSI 升序排列，所有输出均包含基金简称映射
 # ==============================================================================
 
 DATA_DIR = 'fund_data'
 ETF_LIST_FILE = 'ETF列表.xlsx' 
-TRACKER_FILE = 'signal_tracker.csv'    # 历史信号账本
+TRACKER_FILE = 'signal_tracker.csv'    # 历史胜率账本
 BASE_RESULT_DIR = 'results'            # 归档根目录
 
 def calculate_rsi(series, period=14):
@@ -33,7 +32,7 @@ def analyze_fund(file_path):
         df = full_df.tail(120).copy()
         latest = df.iloc[-1]
         
-        # --- 硬核指标计算 ---
+        # --- 核心指标计算 ---
         rsi_val = calculate_rsi(df['收盘']).iloc[-1]
         ma20 = df['收盘'].rolling(20).mean().iloc[-1]
         bias = (latest['收盘'] - ma20) / ma20 * 100
@@ -42,13 +41,13 @@ def analyze_fund(file_path):
         # --- 决策逻辑 ---
         signal_type, reason, is_buy = "观望", "正常波动", False
 
-        if rsi_val < 38: # 买入信号
+        if rsi_val < 38: # 买入阈值
             signal_type, reason, is_buy = "建议买入", "情绪冰点", True
             if rsi_val < 32: reason = "严重超跌/黄金坑"
-        elif rsi_val > 70: # 卖出信号
+        elif rsi_val > 70: # 卖出阈值
             signal_type, reason = "建议卖出", "情绪过热"
-        elif latest['收盘'] > ma20 and vol_ratio < 0.8: # 量价背离卖出
-            signal_type, reason = "建议卖出", "缩量诱多"
+        elif latest['收盘'] > ma20 and vol_ratio < 0.8: # 量价背离
+            signal_type, reason = "建议卖出", "量价背离/缩量诱多"
 
         code = os.path.basename(file_path).replace('.csv', '')
         return {
@@ -63,17 +62,21 @@ def analyze_fund(file_path):
     except: return None
 
 def update_tracker(new_results, hist_map, name_map):
-    """维护回测账本，计算真实胜率 (含简称映射)"""
+    """维护回测账本，确保列名一致性"""
     cols = ['代码', '简称', '入场日期', '买入价', 'T+7收益%', 'T+14收益%', 'T+20收益%', 'T+60收益%', '状态']
     if os.path.exists(TRACKER_FILE):
         tracker = pd.read_csv(TRACKER_FILE)
+        # 补齐可能缺失的“简称”列
+        if '简称' not in tracker.columns:
+            tracker.insert(1, '简称', tracker['代码'].apply(lambda x: name_map.get(str(x).zfill(6), '')))
     else:
         tracker = pd.DataFrame(columns=cols)
 
-    # 记录新买入信号
+    # 1. 记录今日新买入信号
     for item in new_results:
         if item['is_signal']:
             recent = tracker[tracker['代码'] == item['代码']].tail(1)
+            # 冷却期10天，避免重复记账
             if recent.empty or (datetime.now() - pd.to_datetime(recent['入场日期'].values[0])).days > 10:
                 new_row = pd.DataFrame([[
                     item['代码'], name_map.get(item['代码'], '未知'), item['日期'], 
@@ -81,7 +84,7 @@ def update_tracker(new_results, hist_map, name_map):
                 ]], columns=cols)
                 tracker = pd.concat([tracker, new_row], ignore_index=True)
 
-    # 刷新收益
+    # 2. 刷新收益情况
     for idx, row in tracker.iterrows():
         code = str(row['代码']).zfill(6)
         if code in hist_map:
@@ -101,36 +104,35 @@ def update_tracker(new_results, hist_map, name_map):
     return tracker
 
 def main():
-    # 1. 资源映射加载
+    # --- 加载基金列表与名称映射 ---
     target_file = ETF_LIST_FILE if os.path.exists(ETF_LIST_FILE) else ETF_LIST_FILE.replace('.xlsx', '.csv')
     try:
         if target_file.endswith('.xlsx'): name_df = pd.read_excel(target_file)
         else: name_df = pd.read_csv(target_file, encoding='utf-8-sig')
         name_df.columns = [c.strip() for c in name_df.columns]
-        # 确保代码是6位字符串
         name_map = dict(zip(name_df['证券代码'].astype(str).str.zfill(6), name_df['证券简称']))
     except:
-        print("❌ 找不到ETF列表文件，请检查文件路径")
+        print("❌ 错误：无法读取 ETF 列表文件，请确认路径。")
         return
 
-    # 2. 并行扫描
+    # --- 并行扫描分析 ---
     csv_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
-    print(f"🚀 Alpha Hunter 启动：正在为 {len(csv_files)} 个品种进行深度体检...")
+    print(f"🚀 Alpha Hunter V8.5 启动：正在深度诊断 {len(csv_files)} 个品种...")
     with Pool(cpu_count()) as p:
         raw_output = p.map(analyze_fund, csv_files)
     
     results = [r['analysis'] for r in raw_output if r and r['analysis']['代码'] in name_map]
     hist_map = {r['analysis']['代码']: r['history'] for r in raw_output if r}
 
-    # 3. 更新回测账本
+    # --- 更新胜率回测账本 ---
     tracker_df = update_tracker(results, hist_map, name_map)
 
-    # 4. 归档逻辑：买入按RSI升序，卖出按RSI降序
+    # --- 处理今日决策与排序 ---
     buy_list = sorted([r for r in results if r['信号'] == "建议买入"], key=lambda x: x['RSI'])
     sell_list = sorted([r for r in results if r['信号'] == "建议卖出"], key=lambda x: x['RSI'], reverse=True)
     all_decisions = buy_list + sell_list
 
-    # 生成归档文件
+    # --- 生成年月归档文件 ---
     now = datetime.now()
     dir_path = os.path.join(BASE_RESULT_DIR, now.strftime('%Y'), now.strftime('%m'))
     os.makedirs(dir_path, exist_ok=True)
@@ -138,27 +140,28 @@ def main():
 
     if all_decisions:
         output_df = pd.DataFrame(all_decisions)
+        # 插入简称到第二列
         output_df.insert(2, '简称', output_df['代码'].apply(lambda x: name_map.get(x, '未知')))
         output_df.to_csv(full_path, index=False, encoding='utf-8-sig')
-        print(f"💾 官方决策已存至: {full_path}")
+        print(f"💾 今日决策已归档至: {full_path}")
 
-    # 5. 控制台输出
+    # --- 控制台可视化显示 ---
     print(f"\n📅 分析报告日期: {now.strftime('%Y-%m-%d')}")
-    print("=" * 95)
-    print(f"{'代码':<8} | {'简称':<12} | {'信号':<8} | {'RSI':<5} | {'偏离度%':<8} | {'理由'}")
-    print("-" * 95)
+    print("=" * 100)
+    print(f"{'代码':<8} | {'简称':<12} | {'价格':<8} | {'RSI':<5} | {'偏离度%':<8} | {'理由'}")
+    print("-" * 100)
     
     for r in buy_list:
-        print(f"🟢 {r['代码']:<6} | {name_map[r['代码']]:<10} | {r['信号']:<6} | {r['RSI']:<5} | {r['偏离度%']:<8} | {r['理由']}")
+        print(f"🟢 {r['代码']:<6} | {name_map[r['代码']]:<10} | {r['价格']:<8} | {r['RSI']:<5} | {r['偏离度%']:<8} | {r['信号']}({r['理由']})")
     for r in sell_list:
-        print(f"🔴 {r['代码']:<6} | {name_map[r['代码']]:<10} | {r['信号']:<6} | {r['RSI']:<5} | {r['偏离度%']:<8} | {r['理由']}")
+        print(f"🔴 {r['代码']:<6} | {name_map[r['代码']]:<10} | {r['价格']:<8} | {r['RSI']:<5} | {r['偏离度%']:<8} | {r['信号']}({r['理由']})")
     
     if not all_decisions:
-        print("   (当前暂无极端买卖建议，建议网格策略继续运行)")
-    print("=" * 95)
+        print("   (当前暂无极端信号，行情处于平稳区间，网格策略按兵不动)")
+    print("=" * 100)
 
-    # 6. 胜率复盘
-    print("\n📊 历史信号可靠性报告 (signal_tracker.csv):")
+    # --- 胜率复盘简报 ---
+    print("\n📊 历史信号可靠性报告 (Based on signal_tracker.csv):")
     for t in [7, 14, 20, 60]:
         col = f'T+{t}收益%'
         if col in tracker_df.columns:
@@ -166,7 +169,7 @@ def main():
             if not valid.empty:
                 wr = (valid[col].astype(float) > 0).sum() / len(valid) * 100
                 avg = valid[col].astype(float).mean()
-                print(f" >> T+{t:2d}天表现: 胜率 {wr:5.1f}% | 平均收益 {avg:5.2f}% (样本数:{len(valid)})")
+                print(f" >> T+{t:2d}表现: 胜率 {wr:5.1f}% | 平均收益 {avg:5.2f}% (样本数:{len(valid)})")
 
 if __name__ == "__main__":
     main()
