@@ -6,12 +6,12 @@ from datetime import datetime
 from multiprocessing import Pool, cpu_count
 
 # ==============================================================================
-# 战法说明：Alpha Hunter V3 能量趋势网格全能版
-# 整合功能：
-# 1. [经典网格] MA20乖离 + RSI超卖 + 5星金底判定
-# 2. [趋势防护] MA60生命线过滤，区分多头/空头市场
-# 3. [量价侦测] 5日/20日量能比，识别缩量诱多与放量杀跌
-# 4. [动态适配] ATR自适应波动率，自动调整横盘判定标准
+# 战法说明：Alpha Hunter V3 能量趋势网格全能版 (最终完整版)
+# 包含功能：
+# 1. [核心逻辑] MA20动态中轴、RSI风险锁、分级加码、5星金底判定
+# 2. [量价背离] 检测缩量上涨（诱多）与放量下跌（恐慌）
+# 3. [动态适配] 基于 ATR 自动调节不同 ETF 的横盘判定阈值
+# 4. [趋势过滤] MA60 趋势生命线，区分多头排列与空头排列
 # ==============================================================================
 
 DATA_DIR = 'fund_data'
@@ -35,7 +35,7 @@ def analyze_fund(file_path):
         close_series = df['收盘']
         vol_series = df['成交额']
         
-        # --- [1. 流动性与基础过滤] ---
+        # --- [1. 基础过滤逻辑] ---
         turnover_raw = latest.get('换手率', 0)
         try:
             turnover = float(str(turnover_raw).replace('%', ''))
@@ -43,28 +43,26 @@ def analyze_fund(file_path):
             turnover = 0
         if latest['成交额'] < 10000000 or turnover < 0.1: return None
 
-        # --- [2. 计算核心技术指标] ---
-        # 均线系统
+        # --- [2. 关键指标计算] ---
         ma20_s = close_series.rolling(20).mean()
         ma60_s = close_series.rolling(60).mean()
         ma20, ma60 = ma20_s.iloc[-1], ma60_s.iloc[-1]
         
-        # 乖离率与 RSI
         bias = (latest['收盘'] - ma20) / ma20 * 100
         rsi_val = calculate_rsi(close_series).iloc[-1]
         
-        # ATR 动态波动率 (用于自适应横盘判定)
+        # ATR 动态波动率适配
         high_low = df['最高'] - df['最低']
         atr = high_low.rolling(14).mean().iloc[-1]
         relative_atr = (atr / latest['收盘']) * 100
         
-        # 量能系统
+        # 量能系统 (5日量比20日量)
         vol_ma5 = vol_series.tail(5).mean()
         vol_ma20 = vol_series.tail(20).mean()
         vol_ratio = vol_ma5 / (vol_ma20 + 1e-9)
 
-        # --- [3. 横盘逻辑 - 动态阈值版] ---
-        # 波动率大的品种阈值高，小的则低
+        # --- [3. 动态横盘判定逻辑] ---
+        # 自动根据波动率调整阈值：波动大的宽，波动小的窄
         dynamic_threshold = max(0.018, relative_atr * 0.5 / 100)
         is_sideways = ((close_series - ma20_s) / ma20_s).abs() < dynamic_threshold
         sideways_days = 0
@@ -75,7 +73,7 @@ def analyze_fund(file_path):
         # --- [4. 状态综合判定系统] ---
         trend_status = "多头排列" if ma20 > ma60 else "空头排列"
         
-        # 横盘性质判定
+        # 横盘性质判定 (基于 MA20 斜率)
         sideways_type = "动态波动"
         if sideways_days >= 3:
             slope = (ma20_s.iloc[-1] - ma20_s.iloc[-5]) / 5
@@ -83,34 +81,34 @@ def analyze_fund(file_path):
             elif bias > 2.0: sideways_type = "高位派发⚠️"
             else: sideways_type = "中继整理"
 
-        # 核心逻辑：量价背离检测
-        is_divergence = (latest['收盘'] > ma20) and (vol_ratio < 0.85)
+        # 量价背离侦测 (上涨但没量 = 诱多)
+        is_divergence = (latest['收盘'] > ma20) and (vol_ratio < 0.8)
 
-        # 默认网格状态
+        # 默认初始状态
         status, action, weight, star = "正常震荡", "常规网格", "1.0x", "★★★☆☆"
 
-        # 逻辑 A：金底与超卖判定 (买点)
+        # A. 抄底判定 (金底逻辑)
         if rsi_val < 38:
-            status, star = "🔥机会区", "★★★★☆"
-            action = "分批补仓"
+            status, star, action = "🔥机会区", "★★★★☆", "分批补仓"
             if rsi_val < 32:
-                status, action, weight = "🚨超卖加码", "暂停卖出/积极买入", "1.5x"
-                # 终极金底：严重负乖离 + 放量
+                status, action, weight = "🚨超卖加码", "暂停卖出/积极加码", "1.5x"
+                # 黄金坑判定：严重负乖离 + 恐慌放量
                 if vol_ratio > 1.15 and bias < -4.5:
-                    status, star, action, weight = "💎五星金底", "★★★★★", "全力买入", "2.0x"
+                    status, star, action, weight = "💎五星金底", "★★★★★", "全力买入/持有", "2.0x"
         
-        # 逻辑 B：高位与背离风险 (卖点/防守)
+        # B. 风险与背离判定
         elif rsi_val > 70 or is_divergence:
+            star = "★★☆☆☆"
             if is_divergence:
-                status, star, action = "🚫缩量诱多", "★★☆☆☆", "停止买入/仅卖出"
+                status, action = "🚫缩量诱多", "停止买入/仅卖不买"
             else:
-                status, star, action = "⚠️高位超买", "★★☆☆☆", "网格减量/止盈"
+                status, action = "⚠️高位超买", "网格收缩/止盈"
         
-        # 逻辑 C：多头突破判定
+        # C. 趋势突破判定
         elif trend_status == "多头排列" and 0 < bias < 2.5 and sideways_days >= 4:
             status, star, action = "🚀蓄势突破", "★★★★☆", "持仓待涨/网格上移"
 
-        # --- [5. 过滤器：过滤掉无波动的死鱼] ---
+        # 振幅过滤：过滤掉死鱼标的
         avg_amp = df['振幅'].tail(20).mean()
         if avg_amp < 1.0: return None 
 
@@ -135,17 +133,15 @@ def analyze_fund(file_path):
     except Exception: return None
 
 def main():
-    # 查找 ETF 列表文件
+    # 查找列表文件
     target_file = None
     for f in [ETF_LIST_FILE, ETF_LIST_FILE.replace('.xlsx', '.csv')]:
         if os.path.exists(f):
             target_file = f
             break
-    if not target_file:
-        print("❌ 找不到 ETF 列表文件")
-        return
+    if not target_file: return
 
-    # 加载名称映射
+    # 加载映射
     try:
         if target_file.endswith('.xlsx'):
             name_df = pd.read_excel(target_file, engine='openpyxl')
@@ -154,33 +150,26 @@ def main():
         name_df.columns = [c.strip() for c in name_df.columns]
         name_df['证券代码'] = name_df['证券代码'].astype(str).str.zfill(6)
         name_map = dict(zip(name_df['证券代码'], name_df['证券简称']))
-    except Exception as e:
-        print(f"❌ 列表读取失败: {e}")
-        return
+    except: return
 
-    # 并行分析
+    # 并行处理
     csv_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
-    print(f"🔍 正在深度扫描 {len(csv_files)} 个品种...")
+    print(f"🔍 启动 Alpha Hunter V3... 深度分析 {len(csv_files)} 个品种...")
     with Pool(cpu_count()) as p:
         results = p.map(analyze_fund, csv_files)
     
     valid = [r for r in results if r and r['证券代码'] in name_map]
     if not valid:
-        print("💡 当前市场未匹配到高胜率信号，建议空仓等待。")
+        print("💡 当前无符合高置信度信号的品种。")
         return
 
     final_df = pd.DataFrame(valid)
     final_df['证券简称'] = final_df['证券代码'].apply(lambda x: name_map[x])
     
-    # 字段顺序排列
+    # 按照置信度降序、RSI 升序排列
     cols = ['证券代码', '证券简称', '收盘价', 'RSI(14)', '趋势', '乖离率%', '量能比', '波动率%', 
             '横盘天数', '横盘性质', '网格状态', '胜率置信度', '建议操作', '加码倍数', '成交额(万)', '20日均振幅%']
-    
-    # 核心排序：优先展示高置信度标的
-    final_df = final_df[cols].sort_values(
-        by=['胜率置信度', 'RSI(14)'], 
-        ascending=[False, True]
-    )
+    final_df = final_df[cols].sort_values(by=['胜率置信度', 'RSI(14)'], ascending=[False, True])
     
     # 保存结果
     now = datetime.now()
@@ -188,9 +177,10 @@ def main():
     save_path = os.path.join(now.strftime('%Y/%m'), f"alpha_hunter_{now.strftime('%Y%m%d')}.csv")
     final_df.to_csv(save_path, index=False, encoding='utf-8-sig')
     
-    print(f"\n✅ 扫描完成！报告已生成：{save_path}")
-    print("-" * 50)
-    print(final_df[['证券简称', '网格状态', '置信度', '操作指令', '量能比']].head(10))
+    print(f"\n✅ 扫描成功！数据保存在：{save_path}")
+    print("-" * 80)
+    # 修正了字段名，确保不再报 KeyError
+    print(final_df[['证券简称', '网格状态', '胜率置信度', '建议操作', '趋势', '量能比']].head(10))
 
 if __name__ == "__main__":
     main()
