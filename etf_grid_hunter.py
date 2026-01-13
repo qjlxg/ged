@@ -41,7 +41,7 @@ def analyze_fund(file_path):
         # --- 决策逻辑 ---
         signal_type, reason, is_buy = "观望", "正常波动", False
 
-        if rsi_val < 43: # 买入阈值
+        if rsi_val < 42: # 买入阈值
             signal_type, reason, is_buy = "建议买入", "情绪冰点", True
             if rsi_val < 32: reason = "严重超跌/黄金坑"
         elif rsi_val > 70: # 卖出阈值
