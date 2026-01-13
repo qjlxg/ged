@@ -6,17 +6,14 @@ from datetime import datetime
 from multiprocessing import Pool, cpu_count
 
 # ==============================================================================
-# 脚本说明：Alpha Hunter 终极实战版
-# 核心逻辑：
-# 1. [情绪监测] 监测价格是否涨过头（太烫）或跌透了（太冰）。
-# 2. [人气检测] 价格涨但没人跟（虚假繁荣）时自动报警。
-# 3. [自动记账] 发现好机会自动记入“signal_tracker.csv”，帮你算后续涨跌。
-# 4. [环境判定] 区分现在是“顺风局”（多头）还是“逆风局”（空头）。
+# 脚本说明：Alpha Hunter 终极实战版 (V5.1 稳定版)
+# 修复：解决首次运行账本列名匹配导致的 KeyError 报错
+# 功能：全自动量价扫描 + 历史胜率记账 + 大白话诊断
 # ==============================================================================
 
 DATA_DIR = 'fund_data'
 ETF_LIST_FILE = 'ETF列表.xlsx' 
-TRACKER_FILE = 'signal_tracker.csv' # 你的模拟持仓小账本
+TRACKER_FILE = 'signal_tracker.csv' 
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -36,28 +33,19 @@ def analyze_fund(file_path):
         close_series = df['收盘']
         vol_series = df['成交额']
         
-        # --- [计算核心指标] ---
         ma20_s = close_series.rolling(20).mean()
         ma60_s = close_series.rolling(60).mean()
         ma20, ma60 = ma20_s.iloc[-1], ma60_s.iloc[-1]
         
-        # 价格离家（均线）的远近
         dist_pct = (latest['收盘'] - ma20) / ma20 * 100
-        # 情绪温度 (RSI)
         temp = calculate_rsi(close_series).iloc[-1]
-        
-        # 活跃度 (量能比)
         pop = vol_series.tail(5).mean() / (vol_series.tail(20).mean() + 1e-9)
         
-        # 波动弹性 (ATR)
         high_low = df['最高'] - df['最低']
         flex = (high_low.rolling(14).mean().iloc[-1] / latest['收盘']) * 100
 
-        # --- [逻辑判定] ---
-        # 环境判断
         env = "顺风局(强)" if ma20 > ma60 else "逆风局(弱)"
         
-        # 横盘磨洋工判定
         sideways_limit = max(0.018, flex * 0.5 / 100)
         is_boring = ((close_series - ma20_s) / ma20_s).abs() < sideways_limit
         boring_days = 0
@@ -65,14 +53,11 @@ def analyze_fund(file_path):
             if val: boring_days += 1
             else: break
             
-        # 虚假繁荣判定 (涨了但没人气)
         fake_up = (latest['收盘'] > ma20) and (pop < 0.8)
         
-        # 初始结论
         desc, act, multi, star = "正常波动", "该买买该卖卖", "1.0x", "★★★☆☆"
         is_signal = False 
 
-        # A. 抄底逻辑 (大白话版)
         if temp < 38:
             desc, star, is_signal = "🔥跌透了", "★★★★☆", True
             act = "可以分批买"
@@ -80,16 +65,12 @@ def analyze_fund(file_path):
                 desc, act, multi = "🚨极度冰点", "只买不卖/大胆加仓", "1.5x"
                 if pop > 1.15 and dist_pct < -4.5:
                     desc, star, act, multi = "💎黄金坑", "★★★★★", "全力捡钱", "2.0x"
-        
-        # B. 风险逻辑
         elif temp > 70 or fake_up:
             star = "★★☆☆☆"
             if fake_up:
                 desc, act = "🚫虚假繁荣", "别追！小心被套"
             else:
                 desc, act = "⚠️太烫了", "见好就收/分批离场"
-        
-        # C. 突破逻辑
         elif env == "顺风局(强)" and 0 < dist_pct < 2.5 and boring_days >= 4:
             desc, star, act = "🚀要起飞", "★★★★☆", "拿稳了等涨"
 
@@ -107,21 +88,40 @@ def analyze_fund(file_path):
     except Exception: return None
 
 def process_backtest(new_data_list, all_hist_map):
+    # 定义列名模板，确保后续访问一致
+    columns = ['代码', '入场日期', '买入价', '7天后收益%', '14天后收益%', '20天后收益%', '60天后收益%', '状态']
+    
     if os.path.exists(TRACKER_FILE):
-        tracker = pd.read_csv(TRACKER_FILE)
+        try:
+            tracker = pd.read_csv(TRACKER_FILE)
+            # 确保列名一致性
+            for col in columns:
+                if col not in tracker.columns: tracker[col] = np.nan
+        except:
+            tracker = pd.DataFrame(columns=columns)
     else:
-        tracker = pd.DataFrame(columns=['代码', '入场日期', '买入价', '7天后收益%', '14天后收益%', '20天后收益%', '60天后收益%', '状态'])
+        tracker = pd.DataFrame(columns=columns)
 
+    # 1. 记录今日新信号
     for item in new_data_list:
         if item['is_signal']:
             recent = tracker[(tracker['代码'] == item['代码'])].tail(1)
-            if recent.empty or (datetime.now() - pd.to_datetime(recent['入场日期'].values[0])).days > 10:
-                new_row = pd.DataFrame([{
-                    '代码': item['代码'], '入场日期': item['date'], '买入价': item['现价'],
-                    '7天后收益%': np.nan, '14天后收益%': np.nan, '20天后收益%': np.nan, '60天后收益%': np.nan, '状态': '持有中'
-                }])
+            # 10天内不重复记录同一品种
+            can_add = True
+            if not recent.empty:
+                last_date = pd.to_datetime(recent['入场日期'].values[0])
+                if (datetime.now() - last_date).days < 10:
+                    can_add = False
+            
+            if can_add:
+                new_row = pd.DataFrame([{c: np.nan for c in columns}])
+                new_row['代码'] = item['代码']
+                new_row['入场日期'] = item['date']
+                new_row['买入价'] = item['现价']
+                new_row['状态'] = '持有中'
                 tracker = pd.concat([tracker, new_row], ignore_index=True)
 
+    # 2. 刷新收益率
     for idx, row in tracker.iterrows():
         code = str(row['代码']).zfill(6)
         if code in all_hist_map:
@@ -155,7 +155,7 @@ def main():
     except: return
 
     csv_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
-    print(f"🚀 Alpha Hunter 启动：正在帮你看管 {len(csv_files)} 个品种...")
+    print(f"🚀 Alpha Hunter 启动：扫描 {len(csv_files)} 个品种...")
     with Pool(cpu_count()) as p:
         raw_results = p.map(analyze_fund, csv_files)
     
@@ -176,18 +176,25 @@ def main():
     final_df.to_csv(save_path, index=False, encoding='utf-8-sig')
 
     print(f"\n✅ 诊断报告已生成：{save_path}")
-    print("-" * 90)
+    print("-" * 100)
     print(final_df.head(10))
 
-    print("\n📈 历史“买入”后的表现验证 (帮你测试这套方法灵不灵):")
+    print("\n📈 历史“买入”后的表现验证:")
+    # 增加健壮性检查，确保列存在
     for t in [7, 14, 20, 60]:
         col = f'{t}天后收益%'
-        valid = tracker_df[tracker_df[col].notna()]
-        if not valid.empty:
-            wr = (valid[col] > 0).sum() / len(valid) * 100
-            print(f" >> 买入{t}天后：成功率 {wr:.1f}%, 平均赚 {valid[col].mean():.2f}% (样本:{len(valid)}个)")
+        if col in tracker_df.columns:
+            # 显式转换为数值类型，避免 object 类型导致 notna() 异常
+            valid_vals = pd.to_numeric(tracker_df[col], errors='coerce')
+            valid = tracker_df[valid_vals.notna()]
+            if not valid.empty:
+                wr = (pd.to_numeric(valid[col]) > 0).sum() / len(valid) * 100
+                avg = pd.to_numeric(valid[col]).mean()
+                print(f" >> 买入{t:2d}天后：成功率 {wr:5.1f}%, 平均赚 {avg:5.2f}% (样本:{len(valid)}个)")
+            else:
+                print(f" >> 买入{t:2d}天后：还在观察中...")
         else:
-            print(f" >> 买入{t}天后：还在观察中，过几天再来看...")
+            print(f" >> 买入{t:2d}天后：列名异常")
 
 if __name__ == "__main__":
     main()
